@@ -1,0 +1,265 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width,initial-scale=1"/>
+<title>IoT + Blockchain Pharma Tracking</title>
+
+<link rel="stylesheet" href="https://unpkg.com/leaflet@1.9.4/dist/leaflet.css"/>
+<script src="https://unpkg.com/leaflet@1.9.4/dist/leaflet.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+
+<style>
+body{font-family:Segoe UI,Arial;margin:0;background:#f5f9ff}
+header{background:#0b57a4;color:#fff;padding:10px 16px;display:flex;justify-content:space-between;align-items:center}
+header h1{font-size:18px;margin:0}
+select,button,input{padding:6px 8px;border-radius:6px;border:1px solid #ccc}
+.panel{background:#fff;margin:12px;padding:12px;border-radius:10px}
+#map{height:300px;border-radius:8px;margin-top:10px}
+#fda-notifs{max-height:200px;overflow:auto;border:1px solid #ddd;border-radius:8px;padding:8px;background:#fafbfd}
+table{width:100%;border-collapse:collapse;margin-top:8px;font-size:13px}
+th,td{border:1px solid #ddd;padding:6px;text-align:center}
+th{background:#0b57a4;color:#fff}
+.badge{background:#e0ecff;padding:3px 6px;border-radius:6px;margin-right:6px;font-size:12px}
+.btn-accept{background:#2ecc71;color:#fff;border:0;padding:6px 10px;border-radius:6px}
+.btn-reject{background:#e74c3c;color:#fff;border:0;padding:6px 10px;border-radius:6px}
+.eta{font-weight:bold;font-size:15px;margin-top:8px}
+</style>
+</head>
+<body>
+<header>
+  <h1>💊 Pharmacy Supply chain - Iot</h1>
+  <div>
+    Role:
+    <select id="role" onchange="loadRole()">
+      <option value="">-- Select --</option>
+      <option value="user">User</option>
+      <option value="supplier">Supplier</option>
+      <option value="manufacturer">Manufacturer</option>
+      <option value="fda">FDA</option>
+      <option value="distributor">Distributor</option>
+      <option value="pharmacy">Pharmacy</option>
+      <option value="patient">Patient</option>
+    </select>
+  </div>
+</header>
+
+<div id="main" style="padding:12px"></div>
+
+<script>
+const FDA_PASSWORD="1234";
+const IOT_INTERVAL=20000; // 20s
+
+let product=null;
+let blockchain=[];
+let blkId=0;
+let map,vehicleMarker,tempChart,humChart,simTimer=null;
+
+const LOCATIONS={
+  "Delhi - Connaught Place":[28.6315,77.2167],
+  "Mumbai - Bandra":[19.0591,72.8296],
+  "Bangalore - Whitefield":[12.9698,77.7490],
+  "Hyderabad - Hitech City":[17.4474,78.3762],
+  "Chennai - T Nagar":[13.0623,80.2370]
+};
+
+// =============== MAIN RENDER ===============
+function loadRole(){
+  stopTracking();
+  const role=document.getElementById("role").value;
+  const main=document.getElementById("main");
+  main.innerHTML="";
+  if(role==="user") renderUser(main);
+  else if(role==="supplier") renderSupplier(main);
+  else if(role==="manufacturer") renderManufacturer(main);
+  else if(role==="fda") renderFDA(main);
+  else if(role==="distributor") renderDistributor(main);
+  else if(role==="pharmacy") renderPharmacy(main);
+  else if(role==="patient") renderPatient(main);
+}
+
+// USER (place order)
+function renderUser(main){
+  main.innerHTML=`<div class="panel">
+  <h3>Product Order (User)</h3>
+  <input id="pname" placeholder="Drug name" style="width:220px"/><br><br>
+  Pickup: <select id="pickup">${optionsHtml()}</select>
+  Drop: <select id="drop">${optionsHtml()}</select><br><br>
+  <button class="btn-accept" onclick="createProduct()">Place Order</button>
+  </div>`;
+}
+
+// SUPPLIER
+function renderSupplier(main){
+  main.innerHTML=`<div class="panel"><h3>Supplier</h3>`;
+  if(!product || product.stage!=="user"){ main.innerHTML+=`No new order from user.</div>`;return;}
+  main.innerHTML+=`
+  Product: <b>${product.name}</b><br>
+  <input id="veh" placeholder="Vehicle Number"/> <input id="batch" placeholder="Batch ID"/><br><br>
+  <button class="btn-accept" onclick="approveSupplier()">Approve & Send to Manufacturer</button>
+  <button class="btn-reject" onclick="rejectStage('Supplier')">Reject</button></div>`;
+}
+
+// MANUFACTURER
+function renderManufacturer(main){
+  main.innerHTML=`<div class="panel"><h3>Manufacturer</h3>`;
+  if(!product || product.stage!=="supplier"){ main.innerHTML+=`No product from supplier.</div>`;return;}
+  main.innerHTML+=`
+  Product: <b>${product.name}</b><br>
+  Vehicle: ${product.vehicle}<br>
+  Batch ID: ${product.batch}<br><br>
+  <button class="btn-accept" onclick="approveManufacturer()">Produce & Send to FDA</button>
+  <button class="btn-reject" onclick="rejectStage('Manufacturer')">Reject</button></div>`;
+}
+
+// FDA
+function renderFDA(main){
+  const pw=prompt("Enter FDA password:");
+  if(pw!==FDA_PASSWORD){alert("Access denied");return;}
+  main.innerHTML=`<div class="panel"><h3>FDA Portal</h3>`;
+  if(product && product.stage==="manufacturer"){
+    main.innerHTML+=`
+    <div>Product: <b>${product.name}</b><br>Vehicle: ${product.vehicle}<br>Batch ID: ${product.batch}</div><br>
+    <button class="btn-accept" onclick="approveFDA()">Approve & Start Tracking</button>
+    <button class="btn-reject" onclick="rejectStage('FDA')">Reject</button></div>`;
+  }else if(product && product.stage==="fda-approved"){
+    main.innerHTML+=`
+    <div><b>${product.name}</b> (${product.pickup} → ${product.drop})<br>
+    Vehicle: ${product.vehicle} | Batch: ${product.batch}</div>
+    <div id="map"></div>
+    <div style="display:flex;gap:12px;margin-top:10px">
+      <div><b>Temp (°C)</b><canvas id="tChart" width="160" height="100"></canvas></div>
+      <div><b>Humidity (%)</b><canvas id="hChart" width="160" height="100"></canvas></div>
+      <div style="align-self:center"><b>ETA:</b> <span id="eta" class="eta">--</span></div>
+    </div>
+    <div style="margin-top:12px"><b>Notifications</b><div id="fda-notifs"></div></div>
+    <div style="margin-top:12px"><b>Blockchain Ledger</b>
+    <table id="ledger"><tr><th>ID</th><th>Time</th><th>Status</th><th>By</th></tr></table></div>`;
+    initTrackingDashboard();
+  }else main.innerHTML+=`<div>No product for FDA.</div></div>`;
+}
+
+// DISTRIBUTOR
+function renderDistributor(main){
+  main.innerHTML=`<div class="panel"><h3>Distributor</h3>`;
+  if(!product || product.stage!=="fda-approved"){main.innerHTML+=`Waiting for FDA approval.</div>`;return;}
+  main.innerHTML+=`<div>Product: <b>${product.name}</b><br>Vehicle: ${product.vehicle}<br>Batch: ${product.batch}</div>
+  <div>Status: FDA Approved — Delivery to Pharmacy</div>`;
+}
+
+// PHARMACY
+function renderPharmacy(main){
+  main.innerHTML=`<div class="panel"><h3>Pharmacy</h3>`;
+  if(!product || product.stage!=="fda-approved"){main.innerHTML+=`No shipment yet.</div>`;return;}
+  main.innerHTML+=`<div>Product: <b>${product.name}</b><br>Vehicle: ${product.vehicle}<br>Batch: ${product.batch}</div>
+  <div>Status: FDA Approved — Received by Pharmacy</div>`;
+}
+
+// PATIENT
+function renderPatient(main){
+  main.innerHTML=`<div class="panel"><h3>Patient</h3>`;
+  if(!product){main.innerHTML+=`No delivery yet.</div>`;return;}
+  main.innerHTML+=`<div>Product: <b>${product.name}</b><br>Status: ${product.status}</div></div>`;
+}
+
+// ============== ACTIONS =================
+function createProduct(){
+  const n=document.getElementById("pname").value.trim();
+  const p=document.getElementById("pickup").value;
+  const d=document.getElementById("drop").value;
+  if(!n){alert("Enter product name");return;}
+  product={name:n,pickup:p,drop:d,stage:"user",status:"Order placed by user"};
+  addBlock("Order placed","User");
+  alert("Order sent to Supplier");
+  loadRole();
+}
+
+function approveSupplier(){
+  const v=document.getElementById("veh").value.trim();
+  const b=document.getElementById("batch").value.trim();
+  if(!v||!b){alert("Enter vehicle number and batch ID");return;}
+  product.vehicle=v; product.batch=b;
+  product.stage="supplier"; product.status="Approved by Supplier - Sent to Manufacturer";
+  addBlock("Supplier approved, Vehicle:"+v+" Batch:"+b,"Supplier");
+  loadRole();
+}
+
+function approveManufacturer(){
+  product.stage="manufacturer";
+  product.status="Produced & sent to FDA";
+  addBlock("Manufacturer produced and sent to FDA","Manufacturer");
+  loadRole();
+}
+
+function approveFDA(){
+  product.stage="fda-approved";
+  product.status="FDA Approved — Tracking started";
+  addBlock("FDA approved, tracking started","FDA");
+  loadRole();
+}
+
+function rejectStage(by){
+  product.stage="rejected";
+  product.status=`Rejected by ${by}`;
+  addBlock(`Rejected by ${by}`,by);
+  alert("Shipment rejected!");
+  stopTracking();
+  loadRole();
+}
+
+// ============== TRACKING =================
+function initTrackingDashboard(){
+  map=L.map("map").setView([20.5,78.9],5);
+  L.tileLayer("https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png").addTo(map);
+  const start=LOCATIONS[product.pickup],end=LOCATIONS[product.drop];
+  const icon=L.icon({iconUrl:"https://cdn-icons-png.flaticon.com/512/743/743922.png",iconSize:[28,28]});
+  vehicleMarker=L.marker(start,{icon}).addTo(map);
+  L.polyline([start,end],{color:"#0b57a4",weight:4}).addTo(map);
+  map.fitBounds([[start[0],start[1]],[end[0],end[1]]],{padding:[40,40]});
+  tempChart=new Chart(document.getElementById("tChart"),{type:"line",data:{labels:["-4","-3","-2","-1","Now"],datasets:[{data:[25,25,25,25,25]}]},options:{plugins:{legend:{display:false}}}});
+  humChart=new Chart(document.getElementById("hChart"),{type:"line",data:{labels:["-4","-3","-2","-1","Now"],datasets:[{data:[60,60,60,60,60]}]},options:{plugins:{legend:{display:false}}}});
+  renderLedger();
+  startTracking();
+}
+
+function startTracking(){
+  stopTracking();
+  const start=LOCATIONS[product.pickup],end=LOCATIONS[product.drop];
+  const totalDist=haversine(start,end),speed=50,tickDist=speed*(IOT_INTERVAL/3600000);
+  const totalSteps=Math.ceil(totalDist/tickDist); let step=0;
+  simTimer=setInterval(()=>{
+    step++; const frac=Math.min(1,step/totalSteps);
+    const lat=start[0]+(end[0]-start[0])*frac;
+    const lon=start[1]+(end[1]-start[1])*frac;
+    vehicleMarker.setLatLng([lat,lon]);
+    updateIoT();
+    const rem=(totalSteps-step)*(IOT_INTERVAL/1000);
+    document.getElementById("eta").innerText=formatTime(rem);
+    if(frac>=1){ pushNotif("Vehicle reached destination"); addBlock("Delivered","Sensor"); renderLedger(); stopTracking(); }
+  },IOT_INTERVAL);
+}
+
+function stopTracking(){ if(simTimer){clearInterval(simTimer); simTimer=null;} }
+
+function updateIoT(){
+  const t=+(20+Math.random()*8).toFixed(1);
+  const h=+(45+Math.random()*25).toFixed(1);
+  tempChart.data.datasets[0].data.push(t); tempChart.data.datasets[0].data.shift(); tempChart.update();
+  humChart.data.datasets[0].data.push(h); humChart.data.datasets[0].data.shift(); humChart.update();
+  addBlock(`IoT Update: Temp=${t}°C, Hum=${h}%`,"Sensor");
+  renderLedger();
+  if(h>70) pushNotif("⚠️ High humidity: "+h+"%");
+}
+
+// ============== HELPERS =================
+function haversine(a,b){const R=6371;const dLat=(b[0]-a[0])*Math.PI/180,dLon=(b[1]-a[1])*Math.PI/180;const x=Math.sin(dLat/2)**2+Math.cos(a[0]*Math.PI/180)*Math.cos(b[0]*Math.PI/180)*Math.sin(dLon/2)**2;return 2*R*Math.atan2(Math.sqrt(x),Math.sqrt(1-x));}
+function formatTime(sec){const m=Math.floor(sec/60),s=Math.floor(sec%60);return `${m}m ${s}s`;}
+function addBlock(status,by){blkId++;blockchain.unshift({id:blkId,time:new Date().toLocaleTimeString(),status,by});}
+function renderLedger(){const tb=document.getElementById("ledger");if(!tb)return;tb.innerHTML="<tr><th>ID</th><th>Time</th><th>Status</th><th>By</th></tr>"+blockchain.map(b=>`<tr><td>${b.id}</td><td>${b.time}</td><td>${b.status}</td><td>${b.by}</td></tr>`).join("");}
+function pushNotif(msg){const el=document.getElementById("fda-notifs");if(!el)return;const div=document.createElement("div");div.innerHTML=`<span class="badge">${new Date().toLocaleTimeString()}</span>${msg}`;el.prepend(div);}
+function optionsHtml(){return Object.keys(LOCATIONS).map(k=>`<option>${k}</option>`).join("");}
+
+loadRole();
+</script>
+</body>
+</html>
